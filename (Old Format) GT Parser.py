@@ -143,8 +143,9 @@ class NonprofitParser:
             return "Unknown"
 
     def get_organization_name(self, content, format_type):
-        """Extract organization name from content"""
+        """Extract and normalize organization name from content"""
         try:
+            raw_name = None
             if format_type == 'xml':
                 root = content.getroot()
                 # Try multiple possible locations for organization name
@@ -154,16 +155,36 @@ class NonprofitParser:
                 ]:
                     name = root.find(path, self.ns)
                     if name is not None and name.text:
-                        return name.text
+                        raw_name = name.text
+                        break
             else:
                 # Search for organization name in TXT content
                 text_lines = content.split('\n')
                 for line in text_lines:
                     if 'Name of Organization:' in line or 'NAME OF ORGANIZATION:' in line:
-                        return line.split(':', 1)[1].strip()
+                        raw_name = line.split(':', 1)[1].strip()
+                        break
             
-            logger.warning("Could not find organization name")
-            return "Unknown Organization"
+            if not raw_name:
+                logger.warning("Could not find organization name")
+                return "Unknown Organization"
+                
+            # Normalize the organization name to ensure consistency
+            # 1. Convert to uppercase for case-insensitive comparison
+            # 2. Remove common corporate suffixes
+            # 3. Remove extra whitespace
+            normalized_name = raw_name.upper()
+            common_suffixes = [' INC', ' LLC', ' FOUNDATION', ' CORP', ' CORPORATION', ' LTD', ' INCORPORATED']
+            for suffix in common_suffixes:
+                if normalized_name.endswith(suffix):
+                    normalized_name = normalized_name[:-len(suffix)]
+            
+            # Remove extra spaces and trim
+            normalized_name = ' '.join(normalized_name.split())
+            
+            # Return the original name but use normalized version for matching
+            return raw_name
+            
         except Exception as e:
             logger.error(f"Error extracting organization name: {str(e)}")
             return "Unknown Organization"
@@ -253,7 +274,8 @@ class FinancialDataExtractor:
         group_elements = {
             'InformationTechnologyGrp': 'InformationTechnologyGrp',
             'OccupancyGrp': 'OccupancyGrp',
-            'TravelGrp': 'TravelGrp'
+            'TravelGrp': 'TravelGrp',
+            'FeesForServicesAccountingGrp': 'FeesForServicesAccountingGrp'
         }
 
         for field, xml_tag in group_elements.items():
@@ -358,109 +380,155 @@ class FinancialDataExtractor:
         return metrics
 
     def _extract_financial_metrics_txt(self, content):
+        """Extract basic financial metrics from TXT format"""
         metrics = {}
         lines = content.split('\n')
-
+        
+        # Add more comprehensive patterns for financial metrics
+        field_patterns = {
+            'CYTotalRevenueAmt': ['TOTAL REVENUE', 'REVENUE TOTAL'],
+            'CYContributionsGrantsAmt': ['CONTRIBUTIONS AND GRANTS', 'GIFTS GRANTS', 'CONTRIBUTIONS GIFTS GRANTS', 'TOTAL CONTRIBUTIONS'],
+            'CYProgramServiceRevenueAmt': ['PROGRAM SERVICE REVENUE', 'SERVICE REVENUE', 'PROGRAM REVENUE'],
+            'CYInvestmentIncomeAmt': ['INVESTMENT INCOME', 'INVESTMENT EARNINGS', 'DIVIDENDS INTEREST'],
+            'CYOtherRevenueAmt': ['OTHER REVENUE'],
+            'CYTotalExpensesAmt': ['TOTAL EXPENSES', 'EXPENSES TOTAL'],
+            'CYGrantsAndSimilarPaidAmt': ['GRANTS PAID', 'GRANTS AND SIMILAR AMOUNTS PAID'],
+            'CYSalariesCompEmpBnftPaidAmt': ['SALARIES OTHER COMPENSATION', 'SALARIES AND WAGES', 'OFFICER COMPENSATION'],
+            'TotalProgramServiceExpensesAmt': ['PROGRAM SERVICE EXPENSES', 'TOTAL PROGRAM SERVICE'],
+            'FeesForServicesAccountingGrp': ['ACCOUNTING, ACCOUNTING FEE'],
+            'ManagementAndGeneralAmt': ['MANAGEMENT AND GENERAL', 'MANAGEMENT EXPENSES'],
+            'CYTotalFundraisingExpenseAmt': ['FUNDRAISING EXPENSES', 'FUNDRAISING COSTS', 'TOTAL FUNDRAISING'],
+            'CYRevenuesLessExpensesAmt': ['REVENUE LESS EXPENSES', 'NET INCOME', 'EXCESS OR DEFICIT'],
+            'TotalAssetsEOYAmt': ['TOTAL ASSETS', 'ASSETS TOTAL'],
+            'TotalLiabilitiesEOYAmt': ['TOTAL LIABILITIES', 'LIABILITIES TOTAL'],
+            'NetAssetsOrFundBalancesEOYAmt': ['NET ASSETS OR FUND BALANCES', 'TOTAL NET ASSETS', 'FUND BALANCES'],
+            'TotalEmployeeCnt': ['TOTAL NUMBER OF EMPLOYEES', 'NUMBER OF EMPLOYEES', 'EMPLOYEES'],
+            'TotalVolunteersCnt': ['TOTAL NUMBER OF VOLUNTEERS', 'NUMBER OF VOLUNTEERS', 'VOLUNTEERS'],
+            'InformationTechnologyGrp': ['INFORMATION TECHNOLOGY', 'IT EXPENSES', 'TECHNOLOGY EXPENSE'],
+            'OccupancyGrp': ['OCCUPANCY', 'RENT', 'OCCUPANCY EXPENSES'],
+            'TravelGrp': ['TRAVEL', 'TRAVEL EXPENSES', 'TRAVEL COSTS']
+        }
+        
         # Add balance sheet patterns
         balance_sheet_patterns = {
-            'CashNonInterestBearingEOY': ['CASH NON-INTEREST BEARING', 'CASH - NON-INTEREST BEARING'],
-            'AccountsReceivableEOY': ['ACCOUNTS RECEIVABLE'],
-            'AccountsPayableEOY': ['ACCOUNTS PAYABLE', 'ACCOUNTS PAYABLE AND ACCRUED EXPENSES']
+            'CashNonInterestBearingEOY': ['CASH NON-INTEREST BEARING', 'CASH - NON-INTEREST BEARING', 'CASH END OF YEAR'],
+            'AccountsReceivableEOY': ['ACCOUNTS RECEIVABLE', 'RECEIVABLES'],
+            'AccountsPayableEOY': ['ACCOUNTS PAYABLE', 'ACCOUNTS PAYABLE AND ACCRUED EXPENSES', 'PAYABLES']
         }
 
-        # Process balance sheet items
+        # Donor restriction patterns
+        donor_restriction_patterns = {
+            'WithoutDonorRestrictions': ['NO DONOR RESTRICTION', 'UNRESTRICTED NET ASSETS', 'WITHOUT DONOR RESTRICTIONS', 'NET ASSETS WITHOUT DONOR RESTRICTIONS'],
+            'WithDonorRestrictions': ['DONOR RESTRICTION', 'PERMANENTLY RESTRICTED', 'TEMPORARILY RESTRICTED', 'WITH DONOR RESTRICTIONS', 'NET ASSETS WITH DONOR RESTRICTIONS']
+        }
+
+        # Process regular financial metrics
+        for field, patterns in field_patterns.items():
+            for pattern in patterns:
+                found = False
+                for i, line in enumerate(lines):
+                    if pattern in line.upper():
+                        # Look in current and next few lines for a value
+                        for j in range(i, min(i + 5, len(lines))):
+                            value = self._extract_numeric_value(lines[j])
+                            if value:
+                                metrics[field] = value
+                                found = True
+                                break
+                    if found:
+                        break
+
+        # Process balance sheet items with special handling for EOY values
         for field, patterns in balance_sheet_patterns.items():
             for pattern in patterns:
                 for i, line in enumerate(lines):
                     if pattern in line.upper():
-                        # Look for EOY amount in this line and next few lines
-                        for j in range(i, min(i + 5, len(lines))):
-                            line_text = lines[j].upper()
-                            if 'END OF YEAR' in line_text or 'EOY' in line_text:
-                                value = self._extract_numeric_value(lines[j])
-                                if value:
-                                    metrics[field] = value
+                        # First try to find "End of Year" or "EOY" on the same line
+                        if "END OF YEAR" in line.upper() or "EOY" in line.upper():
+                            value = self._extract_numeric_value(line)
+                            if value:
+                                metrics[field] = value
+                                break
+                                
+                        # If not on the same line, look for columns - try to find value in right-most position
+                        else:
+                            # Look for numeric values and take the right-most one (assuming it's EOY)
+                            # This is based on the common format where BOY is left column, EOY is right column
+                            values = self._extract_all_numeric_values(line)
+                            if values and len(values) > 1:
+                                metrics[field] = values[-1]  # Take the last (right-most) value
+                                break
+                            
+                            # If still not found, check next line
+                            if i + 1 < len(lines):
+                                next_line = lines[i + 1]
+                                values = self._extract_all_numeric_values(next_line)
+                                if values and len(values) > 1:
+                                    metrics[field] = values[-1]
                                     break
-                        break
-        
-        # Find total functional expenses
-        for i, line in enumerate(lines):
-            if 'TOTAL FUNCTIONAL EXPENSES' in line.upper():
-                # Look for management and fundraising amounts
-                for j in range(i, min(i + 10, len(lines))):
-                    if 'MANAGEMENT AND GENERAL' in lines[j].upper():
-                        value = self._extract_numeric_value(lines[j])
-                        if value:
-                            metrics['ManagementAndGeneralAmt'] = value
-                    if 'FUNDRAISING' in lines[j].upper():
-                        value = self._extract_numeric_value(lines[j])
-                        if value:
-                            metrics['CYTotalFundraisingExpenseAmt'] = value
-        group_patterns = {
-            'InformationTechnologyGrp': ['Information Technology', 'IT Expenses'],
-            'OccupancyGrp': ['Occupancy', 'Occupancy Expenses'],
-            'TravelGrp': ['Travel', 'Travel Expenses']
-        }
-    
-        for field, patterns in group_patterns.items():
+
+        # Process donor restrictions
+        for field, patterns in donor_restriction_patterns.items():
             for pattern in patterns:
                 for i, line in enumerate(lines):
-                    if pattern.upper() in line.upper():
-                        value = self._extract_numeric_value(line)
-                        if value:
-                            metrics[field] = value
-                            break
-        
-    # Handle donor restrictions
-        donor_restriction_patterns = {
-            'WithoutDonorRestrictions': [
-                'NO DONOR RESTRICTION', 'UNRESTRICTED NET ASSETS',
-                'WITHOUT DONOR RESTRICTIONS'
-            ],
-            'WithDonorRestrictions': [
-                'DONOR RESTRICTION', 'PERMANENTLY RESTRICTED',
-                'WITH DONOR RESTRICTIONS'
-            ]
-        }
-
-        for metric, patterns in donor_restriction_patterns.items():
-            for pattern in patterns:
-                for i, line in enumerate(lines):
-                    if pattern in line.upper() and 'END OF YEAR' in line.upper():
-                        value = self._extract_numeric_value(line)
-                        if value:
-                            metrics[metric] = value
-                            break
-
-
-        # Existing field patterns
-        field_patterns = {
-            'CYTotalRevenueAmt': ['Total revenue', 'TOTAL REVENUE'],
-            'CYTotalExpensesAmt': ['Total expenses', 'TOTAL EXPENSES'],
-            'TotalAssetsEOYAmt': ['Total assets', 'TOTAL ASSETS'],
-            'TotalLiabilitiesEOYAmt': ['Total liabilities', 'TOTAL LIABILITIES'],
-            'NetAssetsOrFundBalancesEOYAmt': ['Total net assets', 'NET ASSETS OR FUND BALANCES'],
-            'TotalProgramServiceExpensesAmt': ['Total program service expenses', 'PROGRAM SERVICE EXPENSES'],
-            'FundraisingExpensesAmt': ['Fundraising expenses', 'FUNDRAISING EXPENSES'],
-            'OtherEmployeeBenefitsAmt': ['Other employee benefits', 'EMPLOYEE BENEFITS'],
-            'CYRevenuesLessExpensesAmt': ['Revenue less expenses', 'REVENUE LESS EXPENSES'],
-            'CYInvestmentIncomeAmt': ['Investment income', 'INVESTMENT INCOME'],
-            'TotalEmployeeCnt': ['Total number of employees', 'NUMBER OF EMPLOYEES'],
-            'TotalVolunteersCnt': ['Total number of volunteers', 'NUMBER OF VOLUNTEERS']
-        }
-        
-        for field, patterns in field_patterns.items():
-            for pattern in patterns:
-                for i, line in enumerate(lines):
-                    if pattern.upper() in line.upper():
-                        for j in range(i, min(i + 3, len(lines))):
-                            value = self._extract_numeric_value(lines[j])
+                    if pattern in line.upper():
+                        # Check if EOY/End of Year is in the line
+                        if "END OF YEAR" in line.upper() or "EOY" in line.upper():
+                            value = self._extract_numeric_value(line)
                             if value:
                                 metrics[field] = value
                                 break
                         
-                        if field not in metrics:
-                            metrics[field] = 'Not found'
+                        # Otherwise look in nearby lines
+                        else:
+                            # Look for line with END OF YEAR or EOY
+                            for j in range(max(0, i - 3), min(i + 4, len(lines))):
+                                if "END OF YEAR" in lines[j].upper() or "EOY" in lines[j].upper():
+                                    value = self._extract_numeric_value(lines[j])
+                                    if value:
+                                        metrics[field] = value
+                                        break
+                                    
+                            # If still not found, look for a line with numbers below the match
+                            if field not in metrics:
+                                for j in range(i + 1, min(i + 4, len(lines))):
+                                    value = self._extract_numeric_value(lines[j])
+                                    if value:
+                                        metrics[field] = value
+                                        break
+
+        # Find total functional expenses with more comprehensive search
+        for i, line in enumerate(lines):
+            if 'TOTAL FUNCTIONAL EXPENSES' in line.upper() or 'STATEMENT OF FUNCTIONAL EXPENSES' in line.upper():
+                # Search more extensively for management and fundraising amounts
+                for j in range(i, min(i + 30, len(lines))):
+                    current_line = lines[j].upper()
+                    
+                    # Management and general
+                    if 'MANAGEMENT AND GENERAL' in current_line or 'MANAGEMENT & GENERAL' in current_line:
+                        # Try current line first
+                        value = self._extract_numeric_value(current_line)
+                        if value:
+                            metrics['ManagementAndGeneralAmt'] = value
+                        else:
+                            # Look at next line if current line doesn't have a value
+                            if j + 1 < len(lines):
+                                value = self._extract_numeric_value(lines[j + 1])
+                                if value:
+                                    metrics['ManagementAndGeneralAmt'] = value
+                    
+                    # Fundraising
+                    if 'FUNDRAISING' in current_line and 'TOTAL' not in current_line:
+                        # Try current line first
+                        value = self._extract_numeric_value(current_line)
+                        if value:
+                            metrics['CYTotalFundraisingExpenseAmt'] = value
+                        else:
+                            # Look at next line if current line doesn't have a value
+                            if j + 1 < len(lines):
+                                value = self._extract_numeric_value(lines[j + 1])
+                                if value:
+                                    metrics['CYTotalFundraisingExpenseAmt'] = value
         
         return metrics
 
@@ -601,13 +669,118 @@ class FinancialDataExtractor:
 
         
         return endowment_data
+    
+    def _extract_all_numeric_values(self, line):
+        """Extract all numeric values from a line of text"""
+        if not line:
+            return []
+        
+        values = []
+        # Clean the line first
+        clean_line = line.replace('$', '').replace(',', '')
+        words = clean_line.split()
+        
+        for word in words:
+            try:
+                # Try to convert to float
+                value = float(''.join(c for c in word if c.isdigit() or c in '.-'))
+                if value != 0:  # Skip zero values as they're often not meaningful
+                    values.append(str(value))
+            except ValueError:
+                continue
+        
+        return values
+        
+    def _extract_numeric_value(self, line):
+        """Extract numeric value from text line - improved version"""
+        if not line:
+            return None
+    
+        # Clean the line
+        clean_line = line.replace('$', '').replace(',', '')
+        
+        # Try a few common patterns for financial data in forms
+        
+        # Pattern 1: Last number on the line is often the value
+        words = clean_line.split()
+        for word in reversed(words):
+            try:
+                # Extract only digits and decimal points
+                numeric_part = ''.join(c for c in word if c.isdigit() or c in '.-')
+                if numeric_part:
+                    return str(float(numeric_part))
+            except ValueError:
+                continue
+        
+        # Pattern 2: Look for parentheses which often indicate negative numbers
+        import re
+        pattern = r'\(([0-9,]+(?:\.[0-9]+)?)\)'
+        matches = re.findall(pattern, line)
+        if matches:
+            try:
+                # Negative value in parentheses
+                return str(-float(matches[0].replace(',', '')))
+            except ValueError:
+                pass
+        
+        # Pattern 3: Look for dollar sign followed by number
+        pattern = r'\$\s*([0-9,]+(?:\.[0-9]+)?)'
+        matches = re.findall(pattern, line)
+        if matches:
+            try:
+                return str(float(matches[0].replace(',', '')))
+            except ValueError:
+                pass
+        
+        return None
 
 
-    def _extract_endowment_data_txt(self, content):
+    def extract_endowment_data_txt(self, content):
         """Extract endowment data from TXT format"""
-        # Implementation for TXT format would go here
-        # This is more complex due to varying formats and would need careful pattern matching
-        return {}
+        endowment_data = {}
+        lines = content.split('\n')
+        
+        # Look for endowment section
+        in_endowment_section = False
+        current_year_data = {}
+        
+        for i, line in enumerate(lines):
+            line_upper = line.upper()
+            
+            # Check for start of endowment section
+            if 'ENDOWMENT FUNDS' in line_upper or 'SCHEDULE D, PART V' in line_upper:
+                in_endowment_section = True
+                continue
+                
+            if in_endowment_section:
+                # Check for end of section
+                if 'PART VI' in line_upper or 'STATEMENT OF REVENUE' in line_upper:
+                    in_endowment_section = False
+                    continue
+                    
+                # Look for specific endowment data fields
+                field_patterns = {
+                    'BeginningYearBalanceAmt': ['BEGINNING OF YEAR', 'BEGINNING BALANCE'],
+                    'ContributionsAmt': ['CONTRIBUTIONS', 'ADDITIONS'],
+                    'InvestmentEarningsOrLossesAmt': ['INVESTMENT EARNINGS', 'NET INVESTMENT EARNINGS', 'INVESTMENT GAINS'],
+                    'GrantsOrScholarshipsAmt': ['GRANTS', 'SCHOLARSHIPS', 'GRANTS OR SCHOLARSHIPS'],
+                    'OtherExpendituresAmt': ['OTHER EXPENDITURES', 'OTHER EXPENSES'],
+                    'AdministrativeExpensesAmt': ['ADMINISTRATIVE', 'ADMIN EXPENSES'],
+                    'EndYearBalanceAmt': ['END OF YEAR', 'ENDING BALANCE']
+                }
+                
+                for field, patterns in field_patterns.items():
+                    if any(pattern in line_upper for pattern in patterns):
+                        # Look for numeric values
+                        value = self._extract_numeric_value(line)
+                        if value:
+                            current_year_data[field] = value
+        
+        # If we found any endowment data, add it
+        if current_year_data:
+            endowment_data['Year_0'] = current_year_data
+        
+        return endowment_data
 
     def _is_leadership_title(self, title):
         """Check if a title matches leadership positions"""
@@ -652,6 +825,7 @@ class ExcelOutputHandler:
             'Fundraising': 'CYTotalFundraisingExpenseAmt',
             'Revenue Less': 'CYRevenuesLessExpensesAmt',
             'Information Technology': 'InformationTechnologyGrp',
+            'Accounting': 'FeesForServicesAccountingGrp',
             'Occupancy': 'OccupancyGrp',
             'Travel': 'TravelGrp',
             'Number of Employees': 'TotalEmployeeCnt',
@@ -798,40 +972,72 @@ class ExcelOutputHandler:
         org_dfs = {}
         years_range = list(range(2018, 2023))  # 2018-2022
         
+        # Create a mapping dictionary to track all variations of an org name
+        name_mapping = {}
+        
+        # First pass: build name mapping
+        for ntee_category, orgs in org_data.items():
+            for org_name in orgs.keys():
+                normalized_name = self._normalize_org_name(org_name)
+                name_mapping[org_name] = normalized_name
+        
+        # Second pass: consolidate data using normalized names
+        normalized_org_data = {}
         for ntee_category, orgs in org_data.items():
             for org_name, years_data in orgs.items():
+                normalized_name = name_mapping[org_name]
+                
+                # Create category if needed
+                if ntee_category not in normalized_org_data:
+                    normalized_org_data[ntee_category] = {}
+                
+                # Create organization if needed
+                if normalized_name not in normalized_org_data[ntee_category]:
+                    normalized_org_data[ntee_category][normalized_name] = []
+                
+                # Add the data
+                normalized_org_data[ntee_category][normalized_name].extend(years_data)
+        
+        # Now process using normalized data structure
+        for ntee_category, orgs in normalized_org_data.items():
+            for normalized_name, years_data in orgs.items():
+                # Use first non-normalized name for display
+                display_name = next((name for name, norm in name_mapping.items() 
+                                if norm == normalized_name), normalized_name)
+                
                 # Initialize dictionary to store metrics by year
                 metrics_by_year = {year: {} for year in years_range}
                 
                 # Process each year's data
                 for year_data in years_data:
                     try:
-                        tax_year = int(year_data['tax_year'])
-                        if tax_year in years_range:
-                            metrics = year_data.get('financial_metrics', {})
-                            endowment_data = year_data.get('endowment_data', {})
-                            
-                            # Store metrics for this year
-                            year_metrics = {}
-                            
-                            # Process metrics in the order of field_mapping
-                            for display_col, field_name in self.field_mapping.items():
-                                if display_col.startswith('Endowment '):
-                                    # Handle endowment data
-                                    if endowment_data and 'Year_0' in endowment_data:
-                                        current_year_endowment = endowment_data['Year_0']
-                                        value = current_year_endowment.get(field_name, None)
-                                        if value is not None:
-                                            year_metrics[display_col] = self.format_value(value, display_col)
-                                else:
-                                    # Handle regular financial metrics
-                                    value = metrics.get(field_name, None)
-                                    year_metrics[display_col] = self.format_value(value, display_col)
-                            
-                            metrics_by_year[tax_year] = year_metrics
-                            
+                        tax_year = year_data.get('tax_year', 'Unknown')
+                        if tax_year != 'Unknown':
+                            tax_year = int(tax_year)
+                            if tax_year in years_range:
+                                metrics = year_data.get('financial_metrics', {})
+                                endowment_data = year_data.get('endowment_data', {})
+                                
+                                # Store metrics for this year
+                                year_metrics = {}
+                                
+                                # Process metrics in the order of field_mapping
+                                for display_col, field_name in self.field_mapping.items():
+                                    if display_col.startswith('Endowment '):
+                                        # Handle endowment data
+                                        if endowment_data and 'Year_0' in endowment_data:
+                                            current_year_endowment = endowment_data['Year_0']
+                                            value = current_year_endowment.get(field_name, None)
+                                            if value is not None:
+                                                year_metrics[display_col] = self.format_value(value, display_col)
+                                    else:
+                                        # Handle regular financial metrics
+                                        value = metrics.get(field_name, None)
+                                        year_metrics[display_col] = self.format_value(value, display_col)
+                                
+                                metrics_by_year[tax_year] = year_metrics
                     except Exception as e:
-                        logger.error(f"Error processing year data for {org_name}: {str(e)}")
+                        logger.error(f"Error processing year data for {display_name}: {str(e)}")
                         continue
                 
                 # Create rows for DataFrame using field_mapping order
@@ -845,15 +1051,39 @@ class ExcelOutputHandler:
                 # Create DataFrame if we have rows
                 if rows:
                     df = pd.DataFrame(rows)
-                    df.insert(0, 'Organization', org_name)
+                    df.insert(0, 'Organization', display_name)
                     
                     # Store DataFrame with NTEE category
-                    org_dfs[org_name] = {
+                    org_dfs[display_name] = {
                         'data': df,
                         'ntee_category': ntee_category
                     }
         
         return org_dfs
+        
+
+    def _normalize_org_name(self, name):
+        """Normalize organization name for consistent matching"""
+        if not name:
+            return "Unknown"
+            
+        # Strip extra whitespace and convert to uppercase
+        normalized = ' '.join(name.upper().split())
+        
+        # Remove common suffixes
+        common_suffixes = [' INC', ' LLC', ' FOUNDATION', ' CORP', ' CORPORATION', ' LTD', ' INCORPORATED']
+        for suffix in common_suffixes:
+            if normalized.endswith(suffix):
+                normalized = normalized[:-len(suffix)]
+        
+        # Handle special case for "UNIVERSITY"
+        if "UNIVERSITY" in normalized:
+            # Extract the main university name
+            parts = normalized.split()
+            if len(parts) > 1 and parts[-1] == "UNIVERSITY":
+                normalized = ' '.join(parts[:-1]) + " UNIVERSITY"
+        
+        return normalized
 
     def write_to_excel(self, org_dfs):
         """Write data to Excel with each organization in its own sheet"""
@@ -904,6 +1134,20 @@ class ExcelOutputHandler:
         except Exception as e:
             logger.error(f"Error writing to Excel: {str(e)}")
             raise
+
+
+    def _normalize_org_name(self, name):
+        """Normalize organization name for consistent matching"""
+        if not name:
+            return "Unknown"
+            
+        normalized = name.upper()
+        common_suffixes = [' INC', ' LLC', ' FOUNDATION', ' CORP', ' CORPORATION', ' LTD', ' INCORPORATED']
+        for suffix in common_suffixes:
+            if normalized.endswith(suffix):
+                normalized = normalized[:-len(suffix)]
+        
+        return ' '.join(normalized.split())
 
     def _format_worksheet(self, worksheet, df):
         """Helper method to format worksheet"""
