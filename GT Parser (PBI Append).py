@@ -520,65 +520,108 @@ class FinancialDataExtractor:
             logger.error(f"Error extracting endowment data: {str(e)}")
             return {}
 
+    # Fixed _extract_endowment_data_xml method to properly handle all years
     def _extract_endowment_data_xml(self, tree):
-        """Extract endowment data from XML format"""
+        """Extract endowment data from XML format - using logic from old parser"""
         root = tree.getroot()
         endowment_data = {}
         
-        # Schedule D endowment fields mapping
+        # Define field mapping
         field_mapping = {
-            'BeginningBalance': 'BeginningYearBalanceAmt',
-            'Contributions': 'ContributionsAmt',
-            'InvestmentEarnings': 'InvestmentEarningsOrLossesAmt',
-            'Grants': 'GrantsOrScholarshipsAmt',
-            'OtherExpenditures': 'OtherExpendituresAmt',
-            'AdminExpenses': 'AdministrativeExpensesAmt',
-            'EndingBalance': 'EndYearBalanceAmt'
+            'BeginningYearBalanceAmt': 'BeginningBalance',
+            'ContributionsAmt': 'Contributions',
+            'InvestmentEarningsOrLossesAmt': 'InvestmentEarnings',
+            'GrantsOrScholarshipsAmt': 'Grants',
+            'OtherExpendituresAmt': 'OtherExpenditures',
+            'AdministrativeExpensesAmt': 'AdminExpenses',
+            'EndYearBalanceAmt': 'EndingBalance'
         }
         
-        # Year group mapping
-        year_groups = {
-            0: 'CYEndwmtFundGrp',
-            1: 'CYMinus1YrEndwmtFundGrp',
-            2: 'CYMinus2YrEndwmtFundGrp',
-            3: 'CYMinus3YrEndwmtFundGrp',
-            4: 'CYMinus4YrEndwmtFundGrp'
-        }
+        # Define year groups with their XML tags
+        year_groups = [
+            ('CYEndwmtFundGrp', 'Year_0'),
+            ('CYMinus1YrEndwmtFundGrp', 'Year_1'),
+            ('CYMinus2YrEndwmtFundGrp', 'Year_2'),
+            ('CYMinus3YrEndwmtFundGrp', 'Year_3'),
+            ('CYMinus4YrEndwmtFundGrp', 'Year_4')
+        ]
         
+        # First try to find Schedule D
         schedule_d = root.find('.//irs:IRS990ScheduleD', self.ns)
         if schedule_d is not None:
-            for year_offset, group_name in year_groups.items():
-                year_data = {}
-                group = schedule_d.find(f'.//irs:{group_name}', self.ns)
-                
-                if group is not None:
-                    for field, xml_tag in field_mapping.items():
-                        value = group.find(f'.//irs:{xml_tag}', self.ns)
-                        year_data[field] = value.text if value is not None else 'Not found'
-                    
-                    endowment_data[f'Year_{year_offset}'] = year_data
+            root_to_search = schedule_d
+        else:
+            # If Schedule D is not found, search in the entire document
+            root_to_search = root
+            
+        for group_tag, year_key in year_groups:
+            year_data = {}
+            # Search for the group in the current root
+            group = root_to_search.find(f'.//irs:{group_tag}', self.ns)
+            
+            if group is not None:
+                for xml_tag, field in field_mapping.items():
+                    value = group.find(f'.//irs:{xml_tag}', self.ns)
+                    if value is not None and value.text:
+                        try:
+                            # Convert to float to handle negative numbers properly
+                            year_data[field] = str(float(value.text))
+                        except ValueError:
+                            year_data[field] = value.text
+                    else:
+                        year_data[field] = None
+                        
+                if any(year_data.values()):  # Only add if we found any data
+                    endowment_data[year_key] = year_data
         
         return endowment_data
-        
-        '''for year_offset in range(5):  # Current year and previous 4 years
-            year_data = {}
-            for field, xml_tag in endowment_fields.items():
-                # Adjust tag for previous years if necessary
-                if year_offset > 0:
-                    xml_tag = f"{xml_tag}Pyr{year_offset}"
-                
-                value = root.find(f'.//irs:{xml_tag}', self.ns)
-                year_data[field] = value.text if value is not None else 'Not found'
-            
-            endowment_data[f'Year_{year_offset}'] = year_data
-        
-        return endowment_data'''
 
     def _extract_endowment_data_txt(self, content):
         """Extract endowment data from TXT format"""
-        # Implementation for TXT format would go here
-        # This is more complex due to varying formats and would need careful pattern matching
-        return {}
+        endowment_data = {}
+        lines = content.split('\n')
+        
+        # Look for endowment section
+        in_endowment_section = False
+        current_year_data = {}
+        
+        for i, line in enumerate(lines):
+            line_upper = line.upper()
+            
+            # Check for start of endowment section
+            if 'ENDOWMENT FUNDS' in line_upper or 'SCHEDULE D, PART V' in line_upper:
+                in_endowment_section = True
+                continue
+                
+            if in_endowment_section:
+                # Check for end of section
+                if 'PART VI' in line_upper or 'STATEMENT OF REVENUE' in line_upper:
+                    in_endowment_section = False
+                    continue
+                    
+                # Look for specific endowment data fields
+                field_patterns = {
+                    'BeginningBalance': ['BEGINNING OF YEAR', 'BEGINNING BALANCE'],
+                    'Contributions': ['CONTRIBUTIONS', 'ADDITIONS'],
+                    'InvestmentEarnings': ['INVESTMENT EARNINGS', 'NET INVESTMENT EARNINGS', 'INVESTMENT GAINS'],
+                    'Grants': ['GRANTS', 'SCHOLARSHIPS', 'GRANTS OR SCHOLARSHIPS'],
+                    'OtherExpenditures': ['OTHER EXPENDITURES', 'OTHER EXPENSES'],
+                    'AdminExpenses': ['ADMINISTRATIVE', 'ADMIN EXPENSES'],
+                    'EndingBalance': ['END OF YEAR', 'ENDING BALANCE']
+                }
+                
+                for field, patterns in field_patterns.items():
+                    if any(pattern in line_upper for pattern in patterns):
+                        # Look for numeric values
+                        value = self._extract_numeric_value(line)
+                        if value:
+                            current_year_data[field] = value
+        
+        # If we found any endowment data, add it
+        if current_year_data:
+            endowment_data['Year_0'] = current_year_data
+        
+        return endowment_data
 
     def _is_leadership_title(self, title):
         """Check if a title matches leadership positions"""
@@ -688,6 +731,15 @@ class ExcelOutputHandler:
                 # Read existing data
                 existing_df = existing_dfs[clean_category]
                 
+                # Add NTEE Category column if it doesn't exist
+                if 'NTEE Category' not in existing_df.columns:
+                    existing_df['NTEE Category'] = category
+                    
+                    # Reorder columns to ensure NTEE Category is second
+                    cols = existing_df.columns.tolist()
+                    cols.insert(1, cols.pop(cols.index('NTEE Category')))
+                    existing_df = existing_df[cols]
+                
                 # Create composite key for identifying duplicates
                 existing_df['_composite_key'] = existing_df['Organization'] + '_' + existing_df['Year'].astype(str)
                 new_df['_composite_key'] = new_df['Organization'] + '_' + new_df['Year'].astype(str)
@@ -716,48 +768,139 @@ class ExcelOutputHandler:
     def consolidate_data(self, org_data):
         """Consolidate data into horizontal format, grouped by NTEE category"""
         category_dfs = {}
+        #YEAR CHANGE HERE
+        current_year = 2022  # Define current year
+        min_year = current_year - 4  # Calculate minimum year (5 years back)
         
         for ntee_category, orgs in org_data.items():
             rows = []
             
             for org_name, years_data in orgs.items():
-                # Sort years_data by tax_year
-                years_data = sorted(years_data, key=lambda x: x['tax_year'])
+                # Create a dictionary to map tax years to their data
+                year_to_data = {}
                 
-                for year_data in years_data:
+                # First pass: collect all tax years and their data
+                for data in years_data:
+                    tax_year = data.get('tax_year')
+                    if tax_year != 'Unknown':
+                        try:
+                            # Convert tax_year to int for comparison
+                            year_int = int(tax_year)
+                            # Only include years in our range
+                            if min_year <= year_int <= current_year:
+                                year_to_data[tax_year] = data
+                        except ValueError:
+                            # Skip if tax_year can't be converted to int
+                            continue
+                
+                # Second pass: process all years including those from endowment data
+                all_years = set(year_to_data.keys())
+                
+                # Add years from endowment data
+                for data in years_data:
+                    endowment_data = data.get('endowment_data', {})
+                    tax_year = data.get('tax_year')
+                    
+                    if tax_year == 'Unknown' or not endowment_data:
+                        continue
+                    
+                    try:
+                        tax_year_int = int(tax_year)
+                        # Only process if the current tax year is in our range
+                        if min_year <= tax_year_int <= current_year:
+                            # For each year in endowment data, calculate the corresponding tax year
+                            for year_key, offset in [('Year_1', 1), ('Year_2', 2), ('Year_3', 3), ('Year_4', 4)]:
+                                if year_key in endowment_data and any(endowment_data[year_key].values()):
+                                    derived_year = tax_year_int - offset
+                                    # Only add if the derived year is in our range
+                                    if min_year <= derived_year <= current_year:
+                                        all_years.add(str(derived_year))
+                    except ValueError:
+                        continue
+                
+                # Process all years
+                for year in sorted(all_years, reverse=True):
                     row = {
                         'Organization': org_name,
-                        'Year': year_data['tax_year']
+                        'NTEE Category': ntee_category,
+                        'Year': year
                     }
                     
-                    # Add financial metrics
-                    metrics = year_data.get('financial_metrics', {})
-                    endowment_data = year_data.get('endowment_data', {}).get('Year_0', {})
+                    # Add financial metrics if we have data for this year
+                    if year in year_to_data:
+                        data = year_to_data[year]
+                        metrics = data.get('financial_metrics', {})
+                        
+                        for display_col, field_name in self.field_mapping.items():
+                            if not display_col.startswith('Endowment '):
+                                value = metrics.get(field_name, '')
+                                row[display_col] = self.format_value(value)
+                    else:
+                        # Set all non-endowment fields to None
+                        for display_col, field_name in self.field_mapping.items():
+                            if not display_col.startswith('Endowment '):
+                                row[display_col] = None
                     
-                    # Add metrics using field_mapping
+                    # Initialize endowment fields to None
                     for display_col, field_name in self.field_mapping.items():
                         if display_col.startswith('Endowment '):
-                            value = endowment_data.get(field_name, '')
-                        else:
-                            value = metrics.get(field_name, '')
-                        row[display_col] = self.format_value(value)
+                            row[display_col] = None
+                    
+                    # Look for endowment data for this year (direct or derived)
+                    for data in years_data:
+                        curr_tax_year = data.get('tax_year')
+                        if curr_tax_year == 'Unknown':
+                            continue
+                            
+                        endowment_data = data.get('endowment_data', {})
+                        if not endowment_data:
+                            continue
+                        
+                        # Check direct match (Year_0)
+                        if curr_tax_year == year and 'Year_0' in endowment_data:
+                            for display_col, field_name in self.field_mapping.items():
+                                if display_col.startswith('Endowment '):
+                                    value = endowment_data['Year_0'].get(field_name, '')
+                                    if value is not None:
+                                        row[display_col] = self.format_value(value)
+                        
+                        # Check derived years
+                        for year_key, offset in [('Year_1', 1), ('Year_2', 2), ('Year_3', 3), ('Year_4', 4)]:
+                            if year_key in endowment_data:
+                                try:
+                                    derived_year = str(int(curr_tax_year) - offset)
+                                    if derived_year == year:
+                                        for display_col, field_name in self.field_mapping.items():
+                                            if display_col.startswith('Endowment '):
+                                                value = endowment_data[year_key].get(field_name, '')
+                                                if value is not None:
+                                                    row[display_col] = self.format_value(value)
+                                except ValueError:
+                                    continue
                     
                     rows.append(row)
             
             if rows:
                 df = pd.DataFrame(rows)
+                
                 # Ensure all columns exist
-                column_order = ['Organization', 'Year'] + list(self.field_mapping.keys())
+                column_order = ['Organization', 'NTEE Category', 'Year'] + [
+                    col for col in self.field_mapping.keys() if col not in ['Organization', 'NTEE Category', 'Year']]
+                
                 for col in column_order:
                     if col not in df.columns:
                         df[col] = None
                         
                 # Reorder columns
                 df = df[column_order]
+                
+                # Sort by organization and year
+                df = df.sort_values(['Organization', 'Year'], ascending=[True, False])
+                
                 category_dfs[ntee_category] = df
         
         return category_dfs
-
+    
     def write_to_excel(self, category_dfs):
         """Write data to Excel with append capability"""
         try:
@@ -808,7 +951,7 @@ def main():
     # Initialize components
     parser = NonprofitParser()
     extractor = FinancialDataExtractor()
-    excel_handler = ExcelOutputHandler(r'C:\Users\aronc\OneDrive\Documents\AppendSheet.xlsx')
+    excel_handler = ExcelOutputHandler(r'C:\Users\us89685\Documents\appenddata.xlsx')
     
     # Dictionary to store all org data by NTEE category
     all_org_data = {}
@@ -853,11 +996,11 @@ def main():
                     )
                     
                     # Extract endowment data (only for most recent year)
-                    if xml_links.index(url) == 0:
-                        result['endowment_data'] = extractor.extract_endowment_data(
-                            result['parsed_content'],
-                            result['format']
-                        )
+                    #if xml_links.index(url) == 0:
+                    result['endowment_data'] = extractor.extract_endowment_data(
+                        result['parsed_content'],
+                        result['format']
+                    )
                     
                     all_org_data[ntee_category][org_name].append(result)
                     logger.info(f"Successfully processed {url}")
