@@ -867,7 +867,27 @@ class ExcelOutputHandler:
 
     def consolidate_data(self, org_data):
         """Consolidate data into year-based format with metrics as rows and orgs as columns"""
-        years_range = list(range(2019, 2024))  # 2019-2023
+        # First, find all available years in the data
+        all_years = set()
+        for org_name, years_data in org_data.items():
+            for year_data in years_data:
+                tax_year = year_data.get('tax_year', 'Unknown')
+                if tax_year != 'Unknown':
+                    try:
+                        all_years.add(int(tax_year))
+                    except (ValueError, TypeError):
+                        continue
+
+        # Determine the year range (most recent 5 years from max available year)
+        if all_years:
+            max_year = max(all_years)
+            min_year = max_year - 4  # 5 years total
+            years_range = list(range(min_year, max_year + 1))
+            logger.info(f"Dynamic year range detected: {min_year} to {max_year}")
+        else:
+            # Fallback to default range if no years found
+            years_range = list(range(2019, 2024))
+            logger.warning("No years detected, using default range 2019-2023")
 
         # Create a dictionary to store data by year
         # Structure: {year: {org_name: {metric: value}}}
